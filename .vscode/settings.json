@@ -1,0 +1,4 @@
+{
+    "solidity.defaultCompiler": "localFile",
+    "solidity.compileUsingLocalVersion": "/Users/max-web3/Desktop/damn-vulnerable-defi/soljson-v0.8.25+commit.b61c2a91.js",
+}

